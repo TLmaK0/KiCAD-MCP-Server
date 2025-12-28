@@ -284,10 +284,14 @@ class ConnectionManager:
 
     @staticmethod
     def _get_property(properties, key: str, default: str = "") -> str:
-        """Helper to get a property value from a list of properties by key."""
+        """Helper to get a property value from a list of properties by key.
+
+        Note: skip library uses .name for property key, not .key
+        """
         for prop in properties:
-            if prop.key == key:
-                return prop.value
+            prop_name = getattr(prop, 'name', None) or getattr(prop, 'key', None)
+            if prop_name == key:
+                return getattr(prop, 'value', default)
         return default
 
     @staticmethod
@@ -307,12 +311,14 @@ class ConnectionManager:
         net_names = set()
         global_labels = set()
 
-        # Collect components from this schematic (kiutils uses schematicSymbols)
-        symbols = getattr(schematic, 'schematicSymbols', []) or getattr(schematic, 'symbol', []) or []
+        # Collect components from this schematic
+        # skip library uses 'symbol' attribute (SymbolCollection)
+        # kiutils uses 'schematicSymbols'
+        symbols = getattr(schematic, 'schematicSymbols', None) or getattr(schematic, 'symbol', None) or []
         for symbol in symbols:
             try:
-                # kiutils stores properties as a list, not an object with attributes
-                props = getattr(symbol, 'properties', [])
+                # skip library uses 'property' (singular), kiutils uses 'properties' (plural)
+                props = getattr(symbol, 'property', None) or getattr(symbol, 'properties', [])
                 ref = ConnectionManager._get_property(props, 'Reference', '')
 
                 # Skip power symbols (start with #)
@@ -350,11 +356,12 @@ class ConnectionManager:
                 if hasattr(label, 'value'):
                     net_names.add(label.value)
 
-        # Process hierarchical sheets recursively (kiutils uses 'sheets' not 'sheet')
-        sheets = getattr(schematic, 'sheets', []) or getattr(schematic, 'sheet', []) or []
+        # Process hierarchical sheets recursively
+        # skip library uses 'sheet' (singular), kiutils uses 'sheets' (plural)
+        sheets = getattr(schematic, 'sheets', None) or getattr(schematic, 'sheet', None) or []
         for sheet in sheets:
             try:
-                # kiutils has fileName and sheetName as Property objects with .value
+                # Try direct attributes first (kiutils style)
                 sheet_name_prop = getattr(sheet, 'sheetName', None)
                 sheet_file_prop = getattr(sheet, 'fileName', None)
 
@@ -362,12 +369,13 @@ class ConnectionManager:
                 sheet_name = sheet_name_prop.value if hasattr(sheet_name_prop, 'value') else str(sheet_name_prop or '')
                 sheet_file = sheet_file_prop.value if hasattr(sheet_file_prop, 'value') else str(sheet_file_prop or '')
 
-                # Fallback to properties list if direct attrs are empty
-                if not sheet_file and hasattr(sheet, 'properties'):
-                    sheet_name = ConnectionManager._get_property(sheet.properties, 'Sheetname', sheet_name)
-                    sheet_name = ConnectionManager._get_property(sheet.properties, 'Sheet name', sheet_name)
-                    sheet_file = ConnectionManager._get_property(sheet.properties, 'Sheetfile', sheet_file)
-                    sheet_file = ConnectionManager._get_property(sheet.properties, 'Sheet file', sheet_file)
+                # Fallback to property collection (skip library uses 'property' singular)
+                if not sheet_file:
+                    props = getattr(sheet, 'property', None) or getattr(sheet, 'properties', [])
+                    sheet_name = ConnectionManager._get_property(props, 'Sheetname', sheet_name)
+                    sheet_name = ConnectionManager._get_property(props, 'Sheet name', sheet_name)
+                    sheet_file = ConnectionManager._get_property(props, 'Sheetfile', sheet_file)
+                    sheet_file = ConnectionManager._get_property(props, 'Sheet file', sheet_file)
 
                 if not sheet_file:
                     logger.warning(f"Sheet has no file property: {sheet_name}")
@@ -381,8 +389,13 @@ class ConnectionManager:
                     continue
 
                 # Load the sub-schematic
+                # skip library uses Schematic(path), kiutils uses Schematic.from_file(path)
                 logger.info(f"Loading hierarchical sheet: {sheet_name} from {sheet_path}")
-                sub_schematic = Schematic.from_file(str(sheet_path))
+                try:
+                    sub_schematic = Schematic(str(sheet_path))
+                except TypeError:
+                    # Fallback for kiutils style
+                    sub_schematic = Schematic.from_file(str(sheet_path))
 
                 # Build hierarchical prefix
                 new_prefix = f"{prefix}/{sheet_name}" if prefix else sheet_name
