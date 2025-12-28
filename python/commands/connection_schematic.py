@@ -283,6 +283,14 @@ class ConnectionManager:
             return []
 
     @staticmethod
+    def _get_property(properties, key: str, default: str = "") -> str:
+        """Helper to get a property value from a list of properties by key."""
+        for prop in properties:
+            if prop.key == key:
+                return prop.value
+        return default
+
+    @staticmethod
     def _collect_from_schematic(schematic: Schematic, base_path: str, prefix: str = ""):
         """
         Recursively collect components and nets from a schematic and its hierarchical sheets.
@@ -299,26 +307,29 @@ class ConnectionManager:
         net_names = set()
         global_labels = set()
 
-        # Collect components from this schematic
-        if hasattr(schematic, 'symbol'):
-            for symbol in schematic.symbol:
-                try:
-                    ref = symbol.property.Reference.value
-                    # Skip power symbols (start with #)
-                    if ref.startswith('#'):
-                        continue
+        # Collect components from this schematic (kiutils uses schematicSymbols)
+        symbols = getattr(schematic, 'schematicSymbols', []) or getattr(schematic, 'symbol', []) or []
+        for symbol in symbols:
+            try:
+                # kiutils stores properties as a list, not an object with attributes
+                props = getattr(symbol, 'properties', [])
+                ref = ConnectionManager._get_property(props, 'Reference', '')
 
-                    full_ref = f"{prefix}/{ref}" if prefix else ref
-                    component_info = {
-                        "reference": full_ref,
-                        "value": symbol.property.Value.value if hasattr(symbol.property, 'Value') else "",
-                        "footprint": symbol.property.Footprint.value if hasattr(symbol.property, 'Footprint') else "",
-                        "sheet": prefix if prefix else "/"
-                    }
-                    components.append(component_info)
-                except Exception as e:
-                    logger.debug(f"Error processing symbol: {e}")
+                # Skip power symbols (start with #)
+                if ref.startswith('#'):
                     continue
+
+                full_ref = f"{prefix}/{ref}" if prefix else ref
+                component_info = {
+                    "reference": full_ref,
+                    "value": ConnectionManager._get_property(props, 'Value', ''),
+                    "footprint": ConnectionManager._get_property(props, 'Footprint', ''),
+                    "sheet": prefix if prefix else "/"
+                }
+                components.append(component_info)
+            except Exception as e:
+                logger.debug(f"Error processing symbol: {e}")
+                continue
 
         # Collect local labels
         if hasattr(schematic, 'label'):
@@ -339,57 +350,57 @@ class ConnectionManager:
                 if hasattr(label, 'value'):
                     net_names.add(label.value)
 
-        # Process hierarchical sheets recursively
-        if hasattr(schematic, 'sheet'):
-            for sheet in schematic.sheet:
-                try:
-                    # Get sheet properties
-                    sheet_name = ""
-                    sheet_file = ""
+        # Process hierarchical sheets recursively (kiutils uses 'sheets' not 'sheet')
+        sheets = getattr(schematic, 'sheets', []) or getattr(schematic, 'sheet', []) or []
+        for sheet in sheets:
+            try:
+                # kiutils has fileName and sheetName as Property objects with .value
+                sheet_name_prop = getattr(sheet, 'sheetName', None)
+                sheet_file_prop = getattr(sheet, 'fileName', None)
 
-                    if hasattr(sheet, 'property'):
-                        if hasattr(sheet.property, 'Sheetname'):
-                            sheet_name = sheet.property.Sheetname.value
-                        elif hasattr(sheet.property, 'Sheet_name'):
-                            sheet_name = sheet.property.Sheet_name.value
+                # Extract .value from Property objects
+                sheet_name = sheet_name_prop.value if hasattr(sheet_name_prop, 'value') else str(sheet_name_prop or '')
+                sheet_file = sheet_file_prop.value if hasattr(sheet_file_prop, 'value') else str(sheet_file_prop or '')
 
-                        if hasattr(sheet.property, 'Sheetfile'):
-                            sheet_file = sheet.property.Sheetfile.value
-                        elif hasattr(sheet.property, 'Sheet_file'):
-                            sheet_file = sheet.property.Sheet_file.value
+                # Fallback to properties list if direct attrs are empty
+                if not sheet_file and hasattr(sheet, 'properties'):
+                    sheet_name = ConnectionManager._get_property(sheet.properties, 'Sheetname', sheet_name)
+                    sheet_name = ConnectionManager._get_property(sheet.properties, 'Sheet name', sheet_name)
+                    sheet_file = ConnectionManager._get_property(sheet.properties, 'Sheetfile', sheet_file)
+                    sheet_file = ConnectionManager._get_property(sheet.properties, 'Sheet file', sheet_file)
 
-                    if not sheet_file:
-                        logger.warning(f"Sheet has no file property: {sheet_name}")
-                        continue
-
-                    # Resolve sheet file path (relative to base_path)
-                    sheet_path = Path(base_path) / sheet_file
-
-                    if not sheet_path.exists():
-                        logger.warning(f"Sheet file not found: {sheet_path}")
-                        continue
-
-                    # Load the sub-schematic
-                    logger.info(f"Loading hierarchical sheet: {sheet_name} from {sheet_path}")
-                    sub_schematic = Schematic(str(sheet_path))
-
-                    # Build hierarchical prefix
-                    new_prefix = f"{prefix}/{sheet_name}" if prefix else sheet_name
-
-                    # Recursively collect from sub-schematic
-                    sub_components, sub_nets, sub_globals = ConnectionManager._collect_from_schematic(
-                        sub_schematic,
-                        str(sheet_path.parent),
-                        new_prefix
-                    )
-
-                    components.extend(sub_components)
-                    net_names.update(sub_nets)
-                    global_labels.update(sub_globals)
-
-                except Exception as e:
-                    logger.error(f"Error processing sheet: {e}")
+                if not sheet_file:
+                    logger.warning(f"Sheet has no file property: {sheet_name}")
                     continue
+
+                # Resolve sheet file path (relative to base_path)
+                sheet_path = Path(base_path) / sheet_file
+
+                if not sheet_path.exists():
+                    logger.warning(f"Sheet file not found: {sheet_path}")
+                    continue
+
+                # Load the sub-schematic
+                logger.info(f"Loading hierarchical sheet: {sheet_name} from {sheet_path}")
+                sub_schematic = Schematic.from_file(str(sheet_path))
+
+                # Build hierarchical prefix
+                new_prefix = f"{prefix}/{sheet_name}" if prefix else sheet_name
+
+                # Recursively collect from sub-schematic
+                sub_components, sub_nets, sub_globals = ConnectionManager._collect_from_schematic(
+                    sub_schematic,
+                    str(sheet_path.parent),
+                    new_prefix
+                )
+
+                components.extend(sub_components)
+                net_names.update(sub_nets)
+                global_labels.update(sub_globals)
+
+            except Exception as e:
+                logger.error(f"Error processing sheet: {e}")
+                continue
 
         return components, net_names, global_labels
 
